@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tomllib
@@ -79,6 +80,19 @@ def apply_hyprland_rules(
             f"dispatch resizewindowpixel exact {w} {h},{ref}",
             f"dispatch movewindowpixel exact {x} {y},{ref}",
             f"dispatch pin {ref}",
+            # Borderless + respect SVG transparency (no blur/shadow behind
+            # transparent pixels).
+            f"setprop {ref} noblur 1",
+            f"setprop {ref} noshadow 1",
+            f"setprop {ref} noborder 1",
+            f"setprop {ref} rounding 0",
+            f"setprop {ref} bordersize 0",
+            # Force full window opacity in both focused and unfocused states;
+            # any transparency should come from the SVG itself, not Hyprland's
+            # inactive-window opacity rules.
+            f"setprop {ref} alpha 1.0 override",
+            f"setprop {ref} alphainactive 1.0 override",
+            f"setprop {ref} alphafullscreen 1.0 override",
         ]
         if click_through:
             # nofocus prevents the window from ever taking keyboard focus;
@@ -178,9 +192,21 @@ def run(
     # hyprctl movewindowpixel and for click-through via XShape.
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
+    # Restore the default SIGINT handler so Ctrl+C in the terminal kills the
+    # app. Qt installs its own handler that swallows the signal until the
+    # event loop processes a native event, which may never happen for an
+    # idle, click-through window.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
     qt_app = QApplication(sys.argv[:1])
     qt_app.setApplicationName(WM_CLASS)
     qt_app.setDesktopFileName(WM_CLASS)
+
+    # Wake the Qt event loop periodically so Python can deliver signals
+    # (SIGINT) even when no GUI events are happening.
+    sigint_timer = QTimer()
+    sigint_timer.start(200)
+    sigint_timer.timeout.connect(lambda: None)
 
     window = ClockWindow(clock, w, h, click_through, interval)
     window.setWindowTitle(WM_CLASS)
