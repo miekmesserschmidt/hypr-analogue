@@ -1,0 +1,14 @@
+[project]
+name = "hypr-analogue"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "py-analogue-clock",
+    "pyqt6>=6.7",
+    "typer>=0.25.1",
+]
+
+[tool.uv.sources]
+py-analogue-clock = { git = "https://github.com/miekmesserschmidt/py-analogue-clock" }
