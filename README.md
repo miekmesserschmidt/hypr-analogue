@@ -2,7 +2,10 @@
 
 Always-on-top analogue clock for Hyprland.
 
-The app runs as a tiny transparent Qt window and is positioned with `hyprctl`.
+The app runs as a transparent Qt window and is positioned with `hyprctl`.
+The the app uses the [py-analogue-clock](https://github.com/miekmesserschmidt/py-analogue-clock)
+library to render a user defined svg clock face.
+
 
 ![hypr-analogue screenshot](docs/2026-05-17-163604_hyprshot.png)
 
