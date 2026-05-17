@@ -89,10 +89,14 @@ def apply_hyprland_rules(
             f"setprop {ref} bordersize 0",
             # Force full window opacity in both focused and unfocused states;
             # any transparency should come from the SVG itself, not Hyprland's
-            # inactive-window opacity rules.
-            f"setprop {ref} alpha 1.0 override",
-            f"setprop {ref} alphainactive 1.0 override",
-            f"setprop {ref} alphafullscreen 1.0 override",
+            # inactive-window opacity rules. `setprop` takes the value and
+            # override flag as separate args.
+            f"setprop {ref} alpha 1.0",
+            f"setprop {ref} alphaoverride 1",
+            f"setprop {ref} alphainactive 1.0",
+            f"setprop {ref} alphainactiveoverride 1",
+            f"setprop {ref} alphafullscreen 1.0",
+            f"setprop {ref} alphafullscreenoverride 1",
         ]
         if click_through:
             # nofocus prevents the window from ever taking keyboard focus;
