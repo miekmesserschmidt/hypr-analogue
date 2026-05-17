@@ -8,6 +8,7 @@ import sys
 import tomllib
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import typer
 from analogue_clock import AnalogueClock
@@ -18,6 +19,52 @@ from PyQt6.QtWidgets import QApplication, QWidget
 
 
 WM_CLASS = "hypr-analogue"
+
+USER_CONFIG_DIR = Path.home() / ".config" / "hypr-analogue"
+USER_CONFIG_PATH = USER_CONFIG_DIR / "config.toml"
+USER_SVG_PATH = USER_CONFIG_DIR / "clock.svg"
+
+# Built-in fallback config, matches example/hypr-analogue.toml.
+BUILTIN_CONFIG: dict = {
+    "window": {
+        "x": 30,
+        "y": 30,
+        "w": 100,
+        "h": 100,
+        "click_through": True,
+        "update_interval_seconds": 1,
+    }
+}
+
+
+def resolve_config(explicit: Optional[Path]) -> dict:
+    """Resolve the config dict from CLI arg, user config dir, env, or builtin."""
+    if explicit is not None:
+        with explicit.open("rb") as f:
+            return tomllib.load(f)
+    if USER_CONFIG_PATH.is_file():
+        with USER_CONFIG_PATH.open("rb") as f:
+            return tomllib.load(f)
+    env_path = os.environ.get("HYPR_ANALOGUE_DEFAULT_CONFIG")
+    if env_path and Path(env_path).is_file():
+        with Path(env_path).open("rb") as f:
+            return tomllib.load(f)
+    return BUILTIN_CONFIG
+
+
+def resolve_svg(explicit: Optional[Path]) -> str:
+    """Resolve the clock SVG content from CLI arg, user config dir, or env."""
+    if explicit is not None:
+        return explicit.read_text()
+    if USER_SVG_PATH.is_file():
+        return USER_SVG_PATH.read_text()
+    env_path = os.environ.get("HYPR_ANALOGUE_DEFAULT_SVG")
+    if env_path and Path(env_path).is_file():
+        return Path(env_path).read_text()
+    raise typer.BadParameter(
+        "No SVG provided. Pass --svg, place one at "
+        f"{USER_SVG_PATH}, or set HYPR_ANALOGUE_DEFAULT_SVG."
+    )
 
 
 def hyprctl(*args: str) -> str:
@@ -200,16 +247,35 @@ class ClockWindow(QWidget):
 
 
 def run(
-    config: Path = typer.Argument(
-        ..., exists=True, dir_okay=False, readable=True, help="Path to TOML config file."
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help=(
+            "Path to TOML config file. Defaults to "
+            "~/.config/hypr-analogue/config.toml, then a built-in fallback."
+        ),
     ),
-    svg: Path = typer.Argument(
-        ..., exists=True, dir_okay=False, readable=True, help="Path to clock face SVG file."
+    svg: Optional[Path] = typer.Option(
+        None,
+        "--svg",
+        "-s",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help=(
+            "Path to clock face SVG file. Defaults to "
+            "~/.config/hypr-analogue/clock.svg, then the SVG installed with "
+            "this package."
+        ),
     ),
 ) -> None:
     """Display an always-on-top analogue clock on Hyprland."""
-    with config.open("rb") as f:
-        cfg = tomllib.load(f)
+    cfg = resolve_config(config)
+    svg_text = resolve_svg(svg)
 
     window_cfg = cfg.get("window", {})
     x = int(window_cfg.get("x", 0))
@@ -226,7 +292,7 @@ def run(
         )
     )
 
-    clock = AnalogueClock(svg=svg.read_text())
+    clock = AnalogueClock(svg=svg_text)
 
     # Force XWayland under Hyprland: needed for absolute positioning via
     # hyprctl movewindowpixel and for click-through via XShape.
