@@ -51,7 +51,8 @@ pkgs.mkShell {
       stdenv.cc.cc.lib
     ])}:$LD_LIBRARY_PATH"
 
-    # Let Qt find the Wayland platform plugin when available.
-    export QT_QPA_PLATFORM="''${QT_QPA_PLATFORM:-wayland;xcb}"
+    # Force XWayland (xcb) so absolute positioning and click-through
+    # (via XShape input region) work under Hyprland.
+    export QT_QPA_PLATFORM="xcb"
   '';
 }
