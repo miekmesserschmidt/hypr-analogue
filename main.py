@@ -41,6 +41,42 @@ def hypr_batch(commands: list[str]) -> None:
     hyprctl("--batch", payload)
 
 
+def get_focused_monitor_size() -> tuple[int, int] | None:
+    """Return (width, height) in logical pixels of the focused monitor."""
+    out = hyprctl("monitors", "-j")
+    if not out:
+        return None
+    try:
+        monitors = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    focused = next((m for m in monitors if m.get("focused")), None)
+    if focused is None and monitors:
+        focused = monitors[0]
+    if not focused:
+        return None
+    width = int(focused.get("width", 0))
+    height = int(focused.get("height", 0))
+    scale = float(focused.get("scale", 1.0)) or 1.0
+    # Hyprland reports raw pixel dimensions; logical size is width / scale.
+    return int(width / scale), int(height / scale)
+
+
+def resolve_position(x: int, y: int, w: int, h: int) -> tuple[int, int]:
+    """Wrap negative x/y around the focused monitor's dimensions."""
+    if x >= 0 and y >= 0:
+        return x, y
+    size = get_focused_monitor_size()
+    if size is None:
+        return x, y
+    mw, mh = size
+    if x < 0:
+        x = mw + x
+    if y < 0:
+        y = mh + y
+    return x, y
+
+
 def find_window_address(pid: int) -> str | None:
     out = hyprctl("clients", "-j")
     if not out:
@@ -217,6 +253,7 @@ def run(
     window.setProperty("_q_styleSheetWindowClass", WM_CLASS)
     window.show()
 
+    x, y = resolve_position(x, y, w, h)
     apply_hyprland_rules(x, y, w, h, click_through)
 
     sys.exit(qt_app.exec())
