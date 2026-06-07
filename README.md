@@ -83,6 +83,33 @@ Meaning of the position fields:
 For example, `x = -150` anchors the clock to the right edge of the monitor,
 150 pixels in from that edge.
 
+## Fade the clock when the cursor is near
+
+Optionally, the clock can fade out as the pointer approaches its centre (handy
+when it sits on top of something you want to see). Add a
+`[cursor-transparency]` section:
+
+```toml
+[cursor-transparency]
+enabled = true
+polling_interval_seconds = 0.2   # how often to poll the cursor position
+opacity = 0.1        # opacity when the cursor is at/within inner_radius
+inner_radius = 50    # px: at or below this distance, opacity = `opacity`
+outer_radius = 400   # px: at or beyond this distance, fully opaque
+```
+
+Behaviour:
+
+- cursor farther than `outer_radius` from the clock centre: fully opaque
+  (no change).
+- cursor closer than `inner_radius`: opacity is `opacity`.
+- in between: opacity scales linearly from `1.0` down to `opacity`.
+
+Distances are measured from the live cursor position to the centre of the
+clock surface (queried via `hyprctl cursorpos` / `hyprctl layers`). The cursor
+is polled every `polling_interval_seconds` on a background thread, so it never
+blocks the per-second clock redraw.
+
 ## Set the clockface SVG
 
 Place your SVG at:

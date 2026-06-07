@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+import math
 import os
 import signal
+import subprocess
 import sys
+import threading
 import tomllib
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -81,6 +86,114 @@ def resolve_svg(explicit: Optional[Path]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class CursorTransparency:
+    """Settings for fading the clock as the cursor nears its centre."""
+
+    enabled: bool = False
+    opacity: float = 1.0
+    inner_radius: float = 0.0
+    outer_radius: float = 0.0
+    polling_interval_seconds: float = 0.2
+
+    def opacity_for_distance(self, distance: float) -> float:
+        """Opacity for a cursor `distance` (px) from the clock centre.
+
+        Beyond `outer_radius` the clock is fully opaque; within `inner_radius`
+        it is at `opacity`; in between it scales linearly.
+        """
+        if distance >= self.outer_radius:
+            return 1.0
+        if distance <= self.inner_radius:
+            return self.opacity
+        span = self.outer_radius - self.inner_radius
+        if span <= 0:
+            return self.opacity
+        # 0 at the inner edge, 1 at the outer edge.
+        t = (distance - self.inner_radius) / span
+        return self.opacity + t * (1.0 - self.opacity)
+
+
+def hyprctl_json(*args: str) -> object | None:
+    """Run `hyprctl <args> -j` and parse its JSON output (None on failure)."""
+    try:
+        result = subprocess.run(
+            ["hyprctl", *args, "-j"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def get_cursor_pos() -> tuple[float, float] | None:
+    """Return the global cursor position in layout pixels."""
+    data = hyprctl_json("cursorpos")
+    if not isinstance(data, dict):
+        return None
+    try:
+        return float(data["x"]), float(data["y"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def find_layer_rect(namespace: str) -> tuple[float, float, float, float] | None:
+    """Return (x, y, w, h) of our layer surface in global layout pixels.
+
+    `hyprctl layers` reports surface coordinates relative to their monitor, so
+    the monitor's layout offset is added to match `hyprctl cursorpos` (which is
+    global).
+    """
+    data = hyprctl_json("layers")
+    if not isinstance(data, dict):
+        return None
+    monitor_offsets = get_monitor_offsets()
+    for monitor_name, monitor in data.items():
+        if not isinstance(monitor, dict):
+            continue
+        levels = monitor.get("levels", {})
+        if not isinstance(levels, dict):
+            continue
+        ox, oy = monitor_offsets.get(monitor_name, (0.0, 0.0))
+        for surfaces in levels.values():
+            for surface in surfaces:
+                if surface.get("namespace") == namespace:
+                    try:
+                        return (
+                            float(surface["x"]) + ox,
+                            float(surface["y"]) + oy,
+                            float(surface["w"]),
+                            float(surface["h"]),
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        return None
+    return None
+
+
+def get_monitor_offsets() -> dict[str, tuple[float, float]]:
+    """Map each monitor name to its (x, y) layout offset in global pixels."""
+    data = hyprctl_json("monitors")
+    offsets: dict[str, tuple[float, float]] = {}
+    if not isinstance(data, list):
+        return offsets
+    for monitor in data:
+        if not isinstance(monitor, dict):
+            continue
+        name = monitor.get("name")
+        if name is None:
+            continue
+        try:
+            offsets[name] = (float(monitor["x"]), float(monitor["y"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return offsets
+
+
 def _apply_transparent_background() -> None:
     """Make GTK windows transparent so only the SVG's own alpha is visible."""
     display = Gdk.Display.get_default()
@@ -98,6 +211,11 @@ def _apply_transparent_background() -> None:
 
 
 class ClockApp(Gtk.Application):
+    # Refresh the cached layer rectangle every N cursor polls (so the effect
+    # survives the surface moving between monitors without querying the layer
+    # geometry on every single poll).
+    RECT_REFRESH_TICKS = 30
+
     def __init__(
         self,
         clock: AnalogueClock,
@@ -107,6 +225,7 @@ class ClockApp(Gtk.Application):
         h: int,
         click_through: bool,
         update_interval_seconds: float,
+        cursor_transparency: CursorTransparency,
     ) -> None:
         super().__init__(
             application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE
@@ -118,8 +237,14 @@ class ClockApp(Gtk.Application):
         self._h = h
         self._click_through = click_through
         self._interval = update_interval_seconds
+        self._cursor_transparency = cursor_transparency
         self._handle: Optional[Rsvg.Handle] = None
         self._area: Optional[Gtk.DrawingArea] = None
+        self._opacity: float = 1.0
+        self._rect: Optional[tuple[float, float, float, float]] = None
+        self._rect_age: int = 0
+        self._poll_stop = threading.Event()
+        self._poll_thread: Optional[threading.Thread] = None
 
     def do_activate(self) -> None:  # GObject vfunc
         _apply_transparent_background()
@@ -149,6 +274,17 @@ class ClockApp(Gtk.Application):
         window.present()
 
         GLib.timeout_add(max(1, int(self._interval * 1000)), self._tick)
+
+        if self._cursor_transparency.enabled:
+            # Poll hyprctl on a background thread: the subprocess calls are
+            # blocking and would otherwise stall the GLib main loop (starving
+            # the per-second clock redraw). Opacity changes are marshalled
+            # back to the main thread via GLib.idle_add.
+            self._poll_thread = threading.Thread(
+                target=self._poll_cursor_loop, daemon=True
+            )
+            self._poll_thread.start()
+            self.connect("shutdown", lambda _app: self._poll_stop.set())
 
     def _anchor(self, window: Gtk.Window) -> None:
         """Anchor to an edge per sign of x/y; negative wraps to the far edge."""
@@ -189,6 +325,40 @@ class ClockApp(Gtk.Application):
         self._render_current()
         return GLib.SOURCE_CONTINUE
 
+    def _poll_cursor_loop(self) -> None:
+        """Background thread: poll hyprctl and push opacity to the main loop."""
+        while not self._poll_stop.is_set():
+            # Refresh the cached layer rectangle periodically (and until
+            # found), so the effect survives the surface moving monitors.
+            if self._rect is None or self._rect_age >= self.RECT_REFRESH_TICKS:
+                self._rect = find_layer_rect(LAYER_NAMESPACE)
+                self._rect_age = 0
+            else:
+                self._rect_age += 1
+
+            opacity = 1.0
+            cursor = get_cursor_pos()
+            if self._rect is not None and cursor is not None:
+                rx, ry, rw, rh = self._rect
+                cx, cy = rx + rw / 2.0, ry + rh / 2.0
+                distance = math.hypot(cursor[0] - cx, cursor[1] - cy)
+                opacity = self._cursor_transparency.opacity_for_distance(
+                    distance
+                )
+
+            GLib.idle_add(self._set_opacity, opacity)
+            self._poll_stop.wait(
+                max(0.01, self._cursor_transparency.polling_interval_seconds)
+            )
+
+    def _set_opacity(self, opacity: float) -> bool:
+        """Apply a new opacity on the main thread, redrawing if it changed."""
+        if opacity != self._opacity:
+            self._opacity = opacity
+            if self._area is not None:
+                self._area.queue_draw()
+        return GLib.SOURCE_REMOVE
+
     def _draw(
         self,
         area: Gtk.DrawingArea,
@@ -215,7 +385,21 @@ class ClockApp(Gtk.Application):
         viewport.y = dy
         viewport.width = dw
         viewport.height = dh
+
+        if self._opacity >= 1.0:
+            handle.render_document(cr, viewport)
+            return
+
+        # Composite the clock through a temporary group at the reduced
+        # opacity. This multiplies into the SVG's own alpha in the same cairo
+        # buffer that the compositor already honours for SVG transparency, so
+        # it is the only reliable way to fade a layer surface (Hyprland has no
+        # layer-opacity rule, and GTK's widget set_opacity may be ignored when
+        # the surface advertises an opaque region).
+        cr.push_group()
         handle.render_document(cr, viewport)
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(self._opacity)
 
 
 def run(
@@ -264,13 +448,26 @@ def run(
         )
     )
 
+    ct_cfg = cfg.get("cursor-transparency", {})
+    cursor_transparency = CursorTransparency(
+        enabled=bool(ct_cfg.get("enabled", False)),
+        opacity=float(ct_cfg.get("opacity", 1.0)),
+        inner_radius=float(ct_cfg.get("inner_radius", 0.0)),
+        outer_radius=float(ct_cfg.get("outer_radius", 0.0)),
+        polling_interval_seconds=float(
+            ct_cfg.get("polling_interval_seconds", 0.2)
+        ),
+    )
+
     clock = AnalogueClock(svg=svg_text)
 
     # Restore the default SIGINT handler so Ctrl+C in the terminal kills the
     # app even while the GLib main loop is idle.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    app = ClockApp(clock, x, y, w, h, click_through, interval)
+    app = ClockApp(
+        clock, x, y, w, h, click_through, interval, cursor_transparency
+    )
     sys.exit(app.run(None))
 
 

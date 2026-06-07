@@ -37,7 +37,21 @@ as the cursor gets closer, between the outer-radius and the inner radius, then t
 ```
 [cursor-transparency]
 enabled = true
+polling_interval_seconds = 0.2 # how often to poll the cursor position
 opacity = 0.1 # 0.0 is fully transparent, 1.0 is fully opaque
 inner_radius = 50 # if the cursor is within this radius, the clock will have opacity given
 outer_radius = 400 # if the cursor is further than this radius, the clock will be fully opaque
 ```
+
+Implementation notes:
+
+- Hyprland 0.55.2 has no way to set a layer surface's opacity (`hyprctl
+  setprop` targets windows/clients, not layers; there is no `alpha`
+  `layerrule`). So the fade is rendered client-side: the clock SVG is
+  composited with `cairo`'s `paint_with_alpha`, multiplying into the SVG's own
+  alpha in the same buffer the compositor honours for transparency.
+- The cursor position and clock-centre are read from `hyprctl cursorpos` and
+  `hyprctl layers` (offset by the monitor's layout position). These blocking
+  `hyprctl` calls run on a background thread polled every
+  `polling_interval_seconds`; computed opacity is marshalled back to the GTK
+  main loop, so cursor polling never stalls the per-second clock redraw.
