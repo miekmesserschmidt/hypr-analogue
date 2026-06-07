@@ -81,17 +81,26 @@
           dontConfigure = true;
           dontBuild = true;
 
-          # We wrap the launcher ourselves below; let wrapGAppsHook4 only
-          # collect the GApps wrapper args (GI_TYPELIB_PATH, GSettings, etc.).
+          # We wrap the launcher ourselves in preFixup (where gappsWrapperArgs
+          # is populated with the full transitive GI_TYPELIB_PATH); let
+          # wrapGAppsHook4 only collect those args, not wrap anything itself.
           dontWrapGApps = true;
 
           installPhase = ''
             runHook preInstall
 
-            mkdir -p $out/share/hypr-analogue $out/bin
+            mkdir -p $out/share/hypr-analogue
             install -Dm644 main.py $out/share/hypr-analogue/main.py
             cp -r example $out/share/hypr-analogue/
 
+            runHook postInstall
+          '';
+
+          # Run after wrapGAppsHook4's setup hook has populated
+          # gappsWrapperArgs (which happens in preFixup), so the wrapper picks
+          # up the complete GI_TYPELIB_PATH for GTK4 and all its transitive
+          # introspection dependencies (Pango, HarfBuzz, Graphene, ...).
+          preFixup = ''
             makeWrapper ${pythonEnv}/bin/python $out/bin/hypr-analogue \
               "''${gappsWrapperArgs[@]}" \
               --add-flags "$out/share/hypr-analogue/main.py" \
@@ -101,8 +110,6 @@
                 "$out/share/hypr-analogue/example/light2.svg" \
               --prefix LD_PRELOAD : \
                 "${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so"
-
-            runHook postInstall
           '';
 
           meta = with pkgs.lib; {
