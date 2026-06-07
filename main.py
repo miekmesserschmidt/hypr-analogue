@@ -1,24 +1,38 @@
 from __future__ import annotations
 
-import json
 import os
 import signal
-import subprocess
 import sys
 import tomllib
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import typer
-from analogue_clock import AnalogueClock
-from PyQt6.QtCore import QByteArray, QRectF, Qt, QTimer
-from PyQt6.QtGui import QPainter
-from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import QApplication, QWidget
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("Gtk4LayerShell", "1.0")
+gi.require_version("Rsvg", "2.0")
+
+import cairo  # noqa: E402
+import typer  # noqa: E402
+from analogue_clock import AnalogueClock  # noqa: E402
+from gi.repository import (  # noqa: E402
+    Gdk,
+    Gio,
+    GLib,
+    Gtk,
+    Gtk4LayerShell as LayerShell,
+    Rsvg,
+)
 
 
-WM_CLASS = "hypr-analogue"
+# Namespace of the wlr-layer-shell surface. This is the name the clock shows
+# up as in `hyprctl layers`, and what `layerrule`s can target.
+LAYER_NAMESPACE = "hypr-analogue-clock"
+
+APP_ID = "org.miek.hypr_analogue"
 
 USER_CONFIG_DIR = Path.home() / ".config" / "hypr-analogue"
 USER_CONFIG_PATH = USER_CONFIG_DIR / "config.toml"
@@ -67,183 +81,141 @@ def resolve_svg(explicit: Optional[Path]) -> str:
     )
 
 
-def hyprctl(*args: str) -> str:
-    """Run hyprctl with the given args, returning stdout (empty on failure)."""
-    try:
-        result = subprocess.run(
-            ["hyprctl", *args],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.stdout
-    except FileNotFoundError:
-        return ""
-
-
-def hypr_batch(commands: list[str]) -> None:
-    if not commands:
+def _apply_transparent_background() -> None:
+    """Make GTK windows transparent so only the SVG's own alpha is visible."""
+    display = Gdk.Display.get_default()
+    if display is None:
         return
-    payload = ";".join(f"dispatch {c}" if not c.startswith(("dispatch ", "keyword ", "setprop ")) else c for c in commands)
-    hyprctl("--batch", payload)
-
-
-def get_focused_monitor_size() -> tuple[int, int] | None:
-    """Return (width, height) in logical pixels of the focused monitor."""
-    out = hyprctl("monitors", "-j")
-    if not out:
-        return None
+    provider = Gtk.CssProvider()
+    css = "window { background: none; }"
     try:
-        monitors = json.loads(out)
-    except json.JSONDecodeError:
-        return None
-    focused = next((m for m in monitors if m.get("focused")), None)
-    if focused is None and monitors:
-        focused = monitors[0]
-    if not focused:
-        return None
-    width = int(focused.get("width", 0))
-    height = int(focused.get("height", 0))
-    scale = float(focused.get("scale", 1.0)) or 1.0
-    # Hyprland reports raw pixel dimensions; logical size is width / scale.
-    return int(width / scale), int(height / scale)
+        provider.load_from_string(css)  # GTK >= 4.12
+    except (AttributeError, TypeError):
+        provider.load_from_data(css.encode("utf-8"))
+    Gtk.StyleContext.add_provider_for_display(
+        display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
 
 
-def resolve_position(x: int, y: int, w: int, h: int) -> tuple[int, int]:
-    """Wrap negative x/y around the focused monitor's dimensions."""
-    if x >= 0 and y >= 0:
-        return x, y
-    size = get_focused_monitor_size()
-    if size is None:
-        return x, y
-    mw, mh = size
-    if x < 0:
-        x = mw + x
-    if y < 0:
-        y = mh + y
-    return x, y
-
-
-def find_window_address(pid: int) -> str | None:
-    out = hyprctl("clients", "-j")
-    if not out:
-        return None
-    try:
-        clients = json.loads(out)
-    except json.JSONDecodeError:
-        return None
-    for c in clients:
-        if c.get("pid") == pid:
-            return c.get("address")
-    return None
-
-
-def apply_hyprland_rules(
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-    click_through: bool,
-    attempts: int = 20,
-    delay_ms: int = 100,
-) -> None:
-    """Locate our just-mapped window via PID and apply float/pin/move/size."""
-    pid = os.getpid()
-
-    def try_apply(remaining: int) -> None:
-        addr = find_window_address(pid)
-        if not addr:
-            if remaining > 0:
-                QTimer.singleShot(delay_ms, lambda: try_apply(remaining - 1))
-            return
-
-        ref = f"address:{addr}"
-        cmds = [
-            f"dispatch setfloating {ref}",
-            f"dispatch resizewindowpixel exact {w} {h},{ref}",
-            f"dispatch movewindowpixel exact {x} {y},{ref}",
-            f"dispatch pin {ref}",
-            # Borderless + respect SVG transparency (no blur/shadow behind
-            # transparent pixels).
-            f"setprop {ref} noblur 1",
-            f"setprop {ref} noshadow 1",
-            f"setprop {ref} noborder 1",
-            f"setprop {ref} rounding 0",
-            f"setprop {ref} bordersize 0",
-            # Force full window opacity in both focused and unfocused states;
-            # any transparency should come from the SVG itself, not Hyprland's
-            # inactive-window opacity rules. `setprop` takes the value and
-            # override flag as separate args.
-            f"setprop {ref} alpha 1.0",
-            f"setprop {ref} alphaoverride 1",
-            f"setprop {ref} alphainactive 1.0",
-            f"setprop {ref} alphainactiveoverride 1",
-            f"setprop {ref} alphafullscreen 1.0",
-            f"setprop {ref} alphafullscreenoverride 1",
-        ]
-        if click_through:
-            # nofocus prevents the window from ever taking keyboard focus;
-            # combined with Qt's WA_TransparentForMouseEvents (XShape input
-            # region) this gives true click-through under XWayland.
-            cmds.append(f"setprop {ref} nofocus 1")
-        hyprctl("--batch", ";".join(cmds))
-
-    QTimer.singleShot(delay_ms, lambda: try_apply(attempts))
-
-
-class ClockWindow(QWidget):
+class ClockApp(Gtk.Application):
     def __init__(
         self,
         clock: AnalogueClock,
+        x: int,
+        y: int,
         w: int,
         h: int,
         click_through: bool,
         update_interval_seconds: float,
     ) -> None:
-        super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
+        super().__init__(
+            application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        if click_through:
-            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-
-        self.resize(w, h)
-        self.setFixedSize(w, h)
-
         self._clock = clock
-        self._renderer = QSvgRenderer(self)
-        self._refresh()
+        self._x = x
+        self._y = y
+        self._w = w
+        self._h = h
+        self._click_through = click_through
+        self._interval = update_interval_seconds
+        self._handle: Optional[Rsvg.Handle] = None
+        self._area: Optional[Gtk.DrawingArea] = None
 
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._refresh)
-        self._timer.start(max(1, int(update_interval_seconds * 1000)))
+    def do_activate(self) -> None:  # GObject vfunc
+        _apply_transparent_background()
 
-    def _refresh(self) -> None:
+        window = Gtk.ApplicationWindow(application=self)
+        window.set_decorated(False)
+
+        # Turn the window into a wlr-layer-shell surface on the overlay layer
+        # (always on top), named so it appears as its own Hyprland layer.
+        LayerShell.init_for_window(window)
+        LayerShell.set_namespace(window, LAYER_NAMESPACE)
+        LayerShell.set_layer(window, LayerShell.Layer.OVERLAY)
+        LayerShell.set_keyboard_mode(window, LayerShell.KeyboardMode.NONE)
+        self._anchor(window)
+
+        area = Gtk.DrawingArea()
+        area.set_content_width(self._w)
+        area.set_content_height(self._h)
+        area.set_draw_func(self._draw, None)
+        window.set_child(area)
+        self._area = area
+
+        if self._click_through:
+            window.connect("realize", self._make_click_through)
+
+        self._render_current()
+        window.present()
+
+        GLib.timeout_add(max(1, int(self._interval * 1000)), self._tick)
+
+    def _anchor(self, window: Gtk.Window) -> None:
+        """Anchor to an edge per sign of x/y; negative wraps to the far edge."""
+        if self._x >= 0:
+            LayerShell.set_anchor(window, LayerShell.Edge.LEFT, True)
+            LayerShell.set_margin(window, LayerShell.Edge.LEFT, self._x)
+        else:
+            LayerShell.set_anchor(window, LayerShell.Edge.RIGHT, True)
+            LayerShell.set_margin(window, LayerShell.Edge.RIGHT, -self._x)
+        if self._y >= 0:
+            LayerShell.set_anchor(window, LayerShell.Edge.TOP, True)
+            LayerShell.set_margin(window, LayerShell.Edge.TOP, self._y)
+        else:
+            LayerShell.set_anchor(window, LayerShell.Edge.BOTTOM, True)
+            LayerShell.set_margin(window, LayerShell.Edge.BOTTOM, -self._y)
+
+    def _make_click_through(self, window: Gtk.Window) -> None:
+        """Give the surface an empty input region so clicks pass through."""
+        surface = window.get_surface()
+        if surface is not None:
+            surface.set_input_region(cairo.Region())
+
+    def _render_current(self) -> None:
         svg = self._clock.generate(datetime.now().time())
-        self._renderer.load(QByteArray(svg.encode("utf-8")))
-        self.update()
+        stream = Gio.MemoryInputStream.new_from_bytes(
+            GLib.Bytes.new(svg.encode("utf-8"))
+        )
+        try:
+            self._handle = Rsvg.Handle.new_from_stream_sync(
+                stream, None, Rsvg.HandleFlags.FLAGS_NONE, None
+            )
+        except GLib.Error:
+            self._handle = None
+        if self._area is not None:
+            self._area.queue_draw()
 
-    def paintEvent(self, event) -> None:  # noqa: ARG002
-        if not self._renderer.isValid():
+    def _tick(self) -> bool:
+        self._render_current()
+        return GLib.SOURCE_CONTINUE
+
+    def _draw(
+        self,
+        area: Gtk.DrawingArea,
+        cr: cairo.Context,
+        width: int,
+        height: int,
+        user_data: object,
+    ) -> None:
+        handle = self._handle
+        if handle is None or width <= 0 or height <= 0:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        size = self._renderer.defaultSize()
-        sw, sh = size.width(), size.height()
-        if sw <= 0 or sh <= 0:
-            return
+        has_size, sw, sh = handle.get_intrinsic_size_in_pixels()
+        if not has_size or sw <= 0 or sh <= 0:
+            sw, sh = float(width), float(height)
 
-        ww, wh = self.width(), self.height()
-        scale = min(ww / sw, wh / sh)
+        scale = min(width / sw, height / sh)
         dw, dh = sw * scale, sh * scale
-        dx = (ww - dw) / 2
-        dy = (wh - dh) / 2
-        self._renderer.render(painter, QRectF(dx, dy, dw, dh))
+        dx = (width - dw) / 2
+        dy = (height - dh) / 2
+
+        viewport = Rsvg.Rectangle()
+        viewport.x = dx
+        viewport.y = dy
+        viewport.width = dw
+        viewport.height = dh
+        handle.render_document(cr, viewport)
 
 
 def run(
@@ -273,7 +245,7 @@ def run(
         ),
     ),
 ) -> None:
-    """Display an always-on-top analogue clock on Hyprland."""
+    """Display an always-on-top analogue clock on its own Hyprland layer."""
     cfg = resolve_config(config)
     svg_text = resolve_svg(svg)
 
@@ -294,35 +266,12 @@ def run(
 
     clock = AnalogueClock(svg=svg_text)
 
-    # Force XWayland under Hyprland: needed for absolute positioning via
-    # hyprctl movewindowpixel and for click-through via XShape.
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-
     # Restore the default SIGINT handler so Ctrl+C in the terminal kills the
-    # app. Qt installs its own handler that swallows the signal until the
-    # event loop processes a native event, which may never happen for an
-    # idle, click-through window.
+    # app even while the GLib main loop is idle.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    qt_app = QApplication(sys.argv[:1])
-    qt_app.setApplicationName(WM_CLASS)
-    qt_app.setDesktopFileName(WM_CLASS)
-
-    # Wake the Qt event loop periodically so Python can deliver signals
-    # (SIGINT) even when no GUI events are happening.
-    sigint_timer = QTimer()
-    sigint_timer.start(200)
-    sigint_timer.timeout.connect(lambda: None)
-
-    window = ClockWindow(clock, w, h, click_through, interval)
-    window.setWindowTitle(WM_CLASS)
-    window.setProperty("_q_styleSheetWindowClass", WM_CLASS)
-    window.show()
-
-    x, y = resolve_position(x, y, w, h)
-    apply_hyprland_rules(x, y, w, h, click_through)
-
-    sys.exit(qt_app.exec())
+    app = ClockApp(clock, x, y, w, h, click_through, interval)
+    sys.exit(app.run(None))
 
 
 def main() -> None:

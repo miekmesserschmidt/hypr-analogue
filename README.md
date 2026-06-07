@@ -75,11 +75,13 @@ update_interval_seconds = 1
 
 Meaning of the position fields:
 
-- `x`, `y`: window top-left position in logical pixels
-- `w`, `h`: window size in pixels
-- negative `x`/`y` values are resolved against the focused monitor size
+- `x`, `y`: margin of the clock from the anchored monitor edge, in pixels
+- `w`, `h`: clock size in pixels
+- a non-negative `x` anchors to the left edge; a negative `x` anchors to the
+  right edge with margin `-x`. `y` works the same way for the top/bottom edges.
 
-For example, `x = -150` means the effective x-position is `monitor_width - 150`.
+For example, `x = -150` anchors the clock to the right edge of the monitor,
+150 pixels in from that edge.
 
 ## Set the clockface SVG
 
@@ -118,5 +120,11 @@ SVG is loaded in this order:
 
 ## Notes
 
-- Requires Hyprland (`hyprctl` must be available).
-- The app forces `QT_QPA_PLATFORM=xcb` for XWayland behavior used by positioning/click-through logic.
+- Requires Hyprland (or another `wlr-layer-shell` compositor).
+- The clock runs as its own `wlr-layer-shell` surface on the overlay layer,
+  with the namespace `hypr-analogue-clock`. It therefore appears as its own
+  Hyprland layer (see `hyprctl layers`), has no window border, and is not
+  affected by inactive-window opacity/blur rules — the only transparency that
+  shows is the SVG's own alpha channel.
+- `click_through = true` gives the surface an empty input region, so pointer
+  events pass through to whatever is below it.

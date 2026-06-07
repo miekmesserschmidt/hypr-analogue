@@ -6,3 +6,9 @@ h = 100
 
 click_through = true
 update_interval_seconds = 1
+
+[cursor-transparency]
+enabled = true
+opacity = 0.1 # 0.0 is fully transparent, 1.0 is fully opaque
+inner_radius = 50 # if the cursor is within this radius, the clock will have opacity given
+outer_radius = 400 # if the cursor is further than this radius, the clock will be fully opaque

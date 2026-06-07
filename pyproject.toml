@@ -1,12 +1,13 @@
 [project]
 name = "hypr-analogue"
-version = "0.1.0"
+version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "py-analogue-clock",
-    "pyqt6>=6.7",
+    "pygobject>=3.50",
+    "pycairo>=1.26",
     "typer>=0.25.1",
 ]
 
