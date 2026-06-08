@@ -178,53 +178,31 @@ def get_cursor_pos() -> tuple[float, float] | None:
 def find_layer_rect(namespace: str) -> tuple[float, float, float, float] | None:
     """Return (x, y, w, h) of our layer surface in global layout pixels.
 
-    `hyprctl layers` reports surface coordinates relative to their monitor, so
-    the monitor's layout offset is added to match `hyprctl cursorpos` (which is
-    global).
+    `hyprctl layers` already reports surface coordinates in the global layout
+    space (the same space as `hyprctl cursorpos`), so they are used directly.
     """
     data = hyprctl_json("layers")
     if not isinstance(data, dict):
         return None
-    monitor_offsets = get_monitor_offsets()
-    for monitor_name, monitor in data.items():
+    for monitor in data.values():
         if not isinstance(monitor, dict):
             continue
         levels = monitor.get("levels", {})
         if not isinstance(levels, dict):
             continue
-        ox, oy = monitor_offsets.get(monitor_name, (0.0, 0.0))
         for surfaces in levels.values():
             for surface in surfaces:
                 if surface.get("namespace") == namespace:
                     try:
                         return (
-                            float(surface["x"]) + ox,
-                            float(surface["y"]) + oy,
+                            float(surface["x"]),
+                            float(surface["y"]),
                             float(surface["w"]),
                             float(surface["h"]),
                         )
                     except (KeyError, TypeError, ValueError):
                         return None
     return None
-
-
-def get_monitor_offsets() -> dict[str, tuple[float, float]]:
-    """Map each monitor name to its (x, y) layout offset in global pixels."""
-    data = hyprctl_json("monitors")
-    offsets: dict[str, tuple[float, float]] = {}
-    if not isinstance(data, list):
-        return offsets
-    for monitor in data:
-        if not isinstance(monitor, dict):
-            continue
-        name = monitor.get("name")
-        if name is None:
-            continue
-        try:
-            offsets[name] = (float(monitor["x"]), float(monitor["y"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return offsets
 
 
 def _apply_transparent_background() -> None:

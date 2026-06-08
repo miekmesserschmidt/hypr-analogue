@@ -51,7 +51,8 @@ Implementation notes:
   composited with `cairo`'s `paint_with_alpha`, multiplying into the SVG's own
   alpha in the same buffer the compositor honours for transparency.
 - The cursor position and clock-centre are read from `hyprctl cursorpos` and
-  `hyprctl layers` (offset by the monitor's layout position). These blocking
+  `hyprctl layers`, both of which already report global layout coordinates.
+  These blocking
   `hyprctl` calls run on a background thread polled every
   `polling_interval_seconds`; computed opacity is marshalled back to the GTK
   main loop, so cursor polling never stalls the per-second clock redraw.
