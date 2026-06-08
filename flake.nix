@@ -21,6 +21,8 @@
         pkgs = nixpkgs.legacyPackages.${system};
         python = pkgs.python314 or pkgs.python313 or pkgs.python3;
         ps = python.pkgs;
+        pyproject = builtins.fromTOML (builtins.readFile ./pyproject.toml);
+        hyprAnalogueVersion = pyproject.project.version;
 
         py-analogue-clock = ps.buildPythonPackage {
           pname = "py-analogue-clock";
@@ -65,7 +67,7 @@
 
         hypr-analogue = pkgs.stdenv.mkDerivation {
           pname = "hypr-analogue";
-          version = "0.3.0";
+          version = hyprAnalogueVersion;
           src = ./.;
 
           nativeBuildInputs = [
@@ -108,6 +110,8 @@
                 "$out/share/hypr-analogue/example/hypr-analogue.toml" \
               --set-default HYPR_ANALOGUE_DEFAULT_SVG \
                 "$out/share/hypr-analogue/example/light2.svg" \
+              --set-default HYPR_ANALOGUE_VERSION \
+                "${hyprAnalogueVersion}" \
               --prefix LD_PRELOAD : \
                 "${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so"
           '';

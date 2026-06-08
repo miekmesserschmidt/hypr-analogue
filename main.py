@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import tomllib
+import importlib.metadata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from gi.repository import (  # noqa: E402
 LAYER_NAMESPACE = "hypr-analogue-clock"
 
 APP_ID = "org.miek.hypr_analogue"
+PROJECT_NAME = "hypr-analogue"
 
 USER_CONFIG_DIR = Path.home() / ".config" / "hypr-analogue"
 USER_CONFIG_PATH = USER_CONFIG_DIR / "config.toml"
@@ -54,6 +56,37 @@ BUILTIN_CONFIG: dict = {
         "update_interval_seconds": 1,
     }
 }
+
+
+def _read_pyproject_version(path: Path) -> str | None:
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    project = data.get("project", {})
+    if not isinstance(project, dict):
+        return None
+    version = project.get("version")
+    if isinstance(version, str):
+        return version
+    return None
+
+
+def get_version() -> str:
+    env_version = os.environ.get("HYPR_ANALOGUE_VERSION")
+    if env_version:
+        return env_version
+    try:
+        return importlib.metadata.version(PROJECT_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    return _read_pyproject_version(Path(__file__).with_name("pyproject.toml")) or "unknown"
+
+
+def version_callback(value: bool) -> None:
+    if value:
+        typer.echo(get_version())
+        raise typer.Exit()
 
 
 def resolve_config(explicit: Optional[Path]) -> dict:
@@ -427,6 +460,13 @@ def run(
             "~/.config/hypr-analogue/clock.svg, then the SVG installed with "
             "this package."
         ),
+    ),
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        callback=version_callback,
+        is_eager=True,
+        help="Show the version and exit.",
     ),
 ) -> None:
     """Display an always-on-top analogue clock on its own Hyprland layer."""
