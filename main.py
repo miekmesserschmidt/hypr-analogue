@@ -389,11 +389,11 @@ class ClockApp(Gtk.Application):
 
     def _draw(
         self,
-        area: Gtk.DrawingArea,
+        _area: Gtk.DrawingArea,
         cr: cairo.Context,
         width: int,
         height: int,
-        user_data: object,
+        _user_data: object,
     ) -> None:
         handle = self._handle
         if handle is None or width <= 0 or height <= 0:
