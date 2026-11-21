@@ -11,7 +11,7 @@ import tomllib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Annotated
 
 import gi
 
@@ -20,18 +20,19 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("Rsvg", "2.0")
 
-import cairo  # noqa: E402
-import typer  # noqa: E402
-from analogue_clock import AnalogueClock  # noqa: E402
-from gi.repository import (  # noqa: E402
+import cairo
+import typer
+from analogue_clock import AnalogueClock
+from gi.repository import (
     Gdk,
     Gio,
     GLib,
     Gtk,
-    Gtk4LayerShell as LayerShell,
     Rsvg,
 )
-
+from gi.repository import (
+    Gtk4LayerShell as LayerShell,
+)
 
 # Namespace of the wlr-layer-shell surface. This is the name the clock shows
 # up as in `hyprctl layers`, and what `layerrule`s can target.
@@ -56,7 +57,7 @@ BUILTIN_CONFIG: dict = {
 }
 
 
-def resolve_config(explicit: Optional[Path]) -> dict:
+def resolve_config(explicit: Path | None) -> dict:
     """Resolve the config dict from CLI arg, user config dir, env, or builtin."""
     if explicit is not None:
         with explicit.open("rb") as f:
@@ -71,7 +72,7 @@ def resolve_config(explicit: Optional[Path]) -> dict:
     return BUILTIN_CONFIG
 
 
-def resolve_svg(explicit: Optional[Path]) -> str:
+def resolve_svg(explicit: Path | None) -> str:
     """Resolve the clock SVG content from CLI arg, user config dir, or env."""
     if explicit is not None:
         return explicit.read_text()
@@ -114,6 +115,20 @@ class CursorTransparency:
         return self.opacity + t * (1.0 - self.opacity)
 
 
+def _clean_subprocess_env() -> dict[str, str]:
+    """Return os.environ without loader overrides needed only by this process.
+
+    The Nix wrapper and dev shell set LD_PRELOAD (libgtk4-layer-shell.so) and
+    LD_LIBRARY_PATH for GTK4; inheriting them into external binaries such as
+    `hyprctl` breaks when their glibc differs from this package's nixpkgs.
+    """
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("LD_PRELOAD", "LD_LIBRARY_PATH")
+    }
+
+
 def hyprctl_json(*args: str) -> object | None:
     """Run `hyprctl <args> -j` and parse its JSON output (None on failure)."""
     try:
@@ -122,8 +137,11 @@ def hyprctl_json(*args: str) -> object | None:
             capture_output=True,
             text=True,
             check=False,
+            env=_clean_subprocess_env(),
         )
     except FileNotFoundError:
+        return None
+    if result.returncode != 0:
         return None
     try:
         return json.loads(result.stdout)
@@ -138,7 +156,7 @@ def get_cursor_pos() -> tuple[float, float] | None:
         return None
     try:
         return float(data["x"]), float(data["y"])
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return None
 
 
@@ -170,7 +188,7 @@ def find_layer_rect(namespace: str) -> tuple[float, float, float, float] | None:
                             float(surface["w"]),
                             float(surface["h"]),
                         )
-                    except (KeyError, TypeError, ValueError):
+                    except KeyError, TypeError, ValueError:
                         return None
     return None
 
@@ -189,7 +207,7 @@ def get_monitor_offsets() -> dict[str, tuple[float, float]]:
             continue
         try:
             offsets[name] = (float(monitor["x"]), float(monitor["y"]))
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             continue
     return offsets
 
@@ -203,7 +221,7 @@ def _apply_transparent_background() -> None:
     css = "window { background: none; }"
     try:
         provider.load_from_string(css)  # GTK >= 4.12
-    except (AttributeError, TypeError):
+    except AttributeError, TypeError:
         provider.load_from_data(css.encode("utf-8"))
     Gtk.StyleContext.add_provider_for_display(
         display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -227,9 +245,7 @@ class ClockApp(Gtk.Application):
         update_interval_seconds: float,
         cursor_transparency: CursorTransparency,
     ) -> None:
-        super().__init__(
-            application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE
-        )
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
         self._clock = clock
         self._x = x
         self._y = y
@@ -238,13 +254,13 @@ class ClockApp(Gtk.Application):
         self._click_through = click_through
         self._interval = update_interval_seconds
         self._cursor_transparency = cursor_transparency
-        self._handle: Optional[Rsvg.Handle] = None
-        self._area: Optional[Gtk.DrawingArea] = None
+        self._handle: Rsvg.Handle | None = None
+        self._area: Gtk.DrawingArea | None = None
         self._opacity: float = 1.0
-        self._rect: Optional[tuple[float, float, float, float]] = None
+        self._rect: tuple[float, float, float, float] | None = None
         self._rect_age: int = 0
         self._poll_stop = threading.Event()
-        self._poll_thread: Optional[threading.Thread] = None
+        self._poll_thread: threading.Thread | None = None
 
     def do_activate(self) -> None:  # GObject vfunc
         _apply_transparent_background()
@@ -342,9 +358,7 @@ class ClockApp(Gtk.Application):
                 rx, ry, rw, rh = self._rect
                 cx, cy = rx + rw / 2.0, ry + rh / 2.0
                 distance = math.hypot(cursor[0] - cx, cursor[1] - cy)
-                opacity = self._cursor_transparency.opacity_for_distance(
-                    distance
-                )
+                opacity = self._cursor_transparency.opacity_for_distance(distance)
 
             GLib.idle_add(self._set_opacity, opacity)
             self._poll_stop.wait(
@@ -403,31 +417,35 @@ class ClockApp(Gtk.Application):
 
 
 def run(
-    config: Optional[Path] = typer.Option(
-        None,
-        "--config",
-        "-c",
-        exists=True,
-        dir_okay=False,
-        readable=True,
-        help=(
-            "Path to TOML config file. Defaults to "
-            "~/.config/hypr-analogue/config.toml, then a built-in fallback."
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help=(
+                "Path to TOML config file. Defaults to "
+                "~/.config/hypr-analogue/config.toml, then a built-in fallback."
+            ),
         ),
-    ),
-    svg: Optional[Path] = typer.Option(
-        None,
-        "--svg",
-        "-s",
-        exists=True,
-        dir_okay=False,
-        readable=True,
-        help=(
-            "Path to clock face SVG file. Defaults to "
-            "~/.config/hypr-analogue/clock.svg, then the SVG installed with "
-            "this package."
+    ] = None,
+    svg: Annotated[
+        Path | None,
+        typer.Option(
+            "--svg",
+            "-s",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help=(
+                "Path to clock face SVG file. Defaults to "
+                "~/.config/hypr-analogue/clock.svg, then the SVG installed with "
+                "this package."
+            ),
         ),
-    ),
+    ] = None,
 ) -> None:
     """Display an always-on-top analogue clock on its own Hyprland layer."""
     cfg = resolve_config(config)
@@ -454,9 +472,7 @@ def run(
         opacity=float(ct_cfg.get("opacity", 1.0)),
         inner_radius=float(ct_cfg.get("inner_radius", 0.0)),
         outer_radius=float(ct_cfg.get("outer_radius", 0.0)),
-        polling_interval_seconds=float(
-            ct_cfg.get("polling_interval_seconds", 0.2)
-        ),
+        polling_interval_seconds=float(ct_cfg.get("polling_interval_seconds", 0.2)),
     )
 
     clock = AnalogueClock(svg=svg_text)
@@ -465,9 +481,7 @@ def run(
     # app even while the GLib main loop is idle.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    app = ClockApp(
-        clock, x, y, w, h, click_through, interval, cursor_transparency
-    )
+    app = ClockApp(clock, x, y, w, h, click_through, interval, cursor_transparency)
     sys.exit(app.run(None))
 
 
